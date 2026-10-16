@@ -1,0 +1,72 @@
+name: Android APK
+
+# Builds the LightCraft web bundle, wraps it in the Android shell (android/), and attaches a
+# debug-signed APK to the run (Actions > Android APK > the run > Artifacts).
+on:
+  push:
+    branches: [android-apk]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Find the wasm-bindgen version in Cargo.lock
+        id: wbg
+        run: |
+          v=$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | grep '^version' | head -1 | cut -d'"' -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "wasm-bindgen $v"
+
+      - name: Install wasm-bindgen-cli
+        run: |
+          if ! command -v wasm-bindgen >/dev/null 2>&1 || ! wasm-bindgen --version | grep -q "${{ steps.wbg.outputs.version }}"; then
+            cargo install wasm-bindgen-cli --version "${{ steps.wbg.outputs.version }}" --locked
+          fi
+
+      - name: Fetch craft-fonts (CJK glyphs; optional)
+        run: git clone --depth 1 https://github.com/storytold/craft-fonts ../craft-fonts || echo "craft-fonts unavailable; continuing without CJK fonts"
+
+      - name: Build the web bundle
+        run: |
+          if [ -d ../craft-fonts ]; then export CRAFT_FONTS_DIR="$(realpath ../craft-fonts)"; fi
+          cargo xtask web
+
+      - name: Stage the bundle into the Android project
+        run: |
+          site="${CARGO_TARGET_DIR:-target}/web-site"
+          ls -la "$site"
+          rm -rf android/app/src/main/assets/www
+          mkdir -p android/app/src/main/assets/www
+          cp -r "$site"/. android/app/src/main/assets/www/
+          # the precompressed copies are for web servers; the APK compresses assets itself
+          find android/app/src/main/assets/www \( -name '*.gz' -o -name '*.br' \) -delete
+          du -sh android/app/src/main/assets/www
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build the debug APK
+        working-directory: android
+        run: gradle --no-daemon assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lightcraft-android-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
